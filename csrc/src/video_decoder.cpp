@@ -176,6 +176,19 @@ public:
         return true;
     }
 
+    static std::shared_ptr<Demuxer> getInstance(const std::string& videoPath)
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto it = demuxerCache.find(videoPath);
+        if (it != demuxerCache.end()) {
+            return it->second;
+        }
+
+        auto newDemuxer = std::make_shared<Demuxer>(videoPath);
+        demuxerCache[videoPath] = newDemuxer;
+        return newDemuxer;
+    }
+
 private:
     static AVFormatContext* createAVFormatContext(const std::string& videoPath) {
         avformat_network_init(); // Initialize FFmpeg network protocols (for RTSP/RTMP streams)
@@ -227,7 +240,13 @@ private:
     int videoStreamIdx;
     bool bMp4H264{false};
     bool bMp4HEVC{false};
+
+    static std::unordered_map<std::string, std::shared_ptr<Demuxer>> demuxerCache;
+    static std::mutex cacheMutex;
 };
+
+std::mutex Demuxer::cacheMutex;
+std::unordered_map<std::string, std::shared_ptr<Demuxer>> Demuxer::demuxerCache;
 
 VideoDecoder::VideoDecoder(int gpuId, const std::string& codec) {
     ck(cuInit(0));
@@ -287,13 +306,13 @@ std::vector<py::array_t<uint8_t>> VideoDecoder::decodeToNps(const std::string& v
 
 py::array_t<uint8_t> VideoDecoder::decodeToNp(const std::string& videoPath, int frameIndex) {
     try {
-        Demuxer demuxer(videoPath);
-        auto frameTimestamp = demuxer.seek(static_cast<size_t>(frameIndex));
+        auto demuxer = Demuxer::getInstance(videoPath);
+        auto frameTimestamp = demuxer->seek(static_cast<size_t>(frameIndex));
 
         uint8_t* video = nullptr;
         int64_t timestamp = 0;
         int videoBytes = 0;
-        while (demuxer.demux(&video, &videoBytes, timestamp) && timestamp <= frameTimestamp) {
+        while (demuxer->demux(&video, &videoBytes, timestamp) && timestamp <= frameTimestamp) {
             auto frame_num = this->nvDecoder_->Decode(video, videoBytes, CUVID_PKT_ENDOFPICTURE, timestamp);
             if (frame_num == 0)
                 continue;
@@ -317,13 +336,13 @@ py::array_t<uint8_t> VideoDecoder::decodeToNp(const std::string& videoPath, int 
 
 torch::Tensor VideoDecoder::decodeToTensor(const std::string& videoPath, int frameIndex) {
     try {
-        Demuxer demuxer(videoPath);
-        auto frameTimestamp = demuxer.seek(static_cast<size_t>(frameIndex));
+        auto demuxer = Demuxer::getInstance(videoPath);
+        auto frameTimestamp = demuxer->seek(static_cast<size_t>(frameIndex));
 
         uint8_t* video = nullptr;
         int64_t timestamp = 0;
         int videoBytes = 0;
-        while (demuxer.demux(&video, &videoBytes, timestamp) && timestamp <= frameTimestamp) {
+        while (demuxer->demux(&video, &videoBytes, timestamp) && timestamp <= frameTimestamp) {
             auto frame_num = this->nvDecoder_->Decode(video, videoBytes, CUVID_PKT_ENDOFPICTURE, timestamp);
             if (frame_num == 0)
                 continue;
